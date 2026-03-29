@@ -190,7 +190,10 @@ function ChatView({ chat, onBack, onVideoCall }: { chat: Chat; onBack: () => voi
         {loading && <div className="flex justify-center py-8"><div className="w-5 h-5 rounded-full border-2 border-violet-500 border-t-transparent animate-spin" /></div>}
         {!loading && msgs.length === 0 && <div className="text-center py-12 text-white/25 text-sm">Начните общение!</div>}
         {msgs.map(msg => (
-          <div key={msg.id} className={`flex ${msg.mine ? "justify-end" : "justify-start"}`}>
+          <div key={msg.id} className={`flex flex-col ${msg.mine ? "items-end" : "items-start"}`}>
+            <div className={`text-[11px] mb-1 px-1 font-medium ${msg.mine ? "text-violet-300/70" : "text-white/45"}`}>
+              {msg.mine ? "Вы" : msg.sender_name}
+            </div>
             <div className={`max-w-[75%] px-4 py-2.5 rounded-2xl text-sm leading-relaxed ${msg.mine ? "btn-gradient rounded-br-sm" : "bg-white/8 rounded-bl-sm"}`}>
               {msg.text}
               <div className={`text-[10px] mt-1 ${msg.mine ? "text-white/60" : "text-white/35"} text-right`}>{formatTime(msg.created_at)}</div>
