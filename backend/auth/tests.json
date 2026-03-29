@@ -1,0 +1,13 @@
+{
+  "tests": [
+    {
+      "name": "Register new user",
+      "method": "POST",
+      "path": "/",
+      "body": {"action": "register", "name": "Тест Юзер", "phone": "+79991112233", "password": "test123"},
+      "expectedStatus": 200,
+      "expectedBody": {"token": "string"},
+      "bodyMatcher": "partial"
+    }
+  ]
+}
