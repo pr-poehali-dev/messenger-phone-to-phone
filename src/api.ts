@@ -49,4 +49,10 @@ export const api = {
 
   profileUpdate: (name: string, bio: string, username: string) =>
     call(URLS.contacts, { action: "profile", name, bio, username }),
+
+  chatUpload: (file_data: string, file_name: string, file_type: string) =>
+    call(URLS.chats, { action: "upload", file_data, file_name, file_type }),
+
+  chatSendMedia: (chat_id: number, text: string, media_url: string, media_type: string) =>
+    call(URLS.chats, { action: "send", chat_id, text, media_url, media_type }),
 };

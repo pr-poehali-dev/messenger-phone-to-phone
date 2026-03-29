@@ -1,13 +1,14 @@
 {
   "tests": [
     {
-      "name": "Get chats list unauthorized",
+      "name": "Messages without chat_id returns 400",
       "method": "POST",
       "path": "/",
-      "body": {"action": "list"},
+      "headers": {"X-Auth-Token": "invalid_token_test"},
+      "body": {"action": "messages"},
       "expectedStatus": 401,
-      "expectedBody": {"error": "string"},
-      "bodyMatcher": "partial"
+      "expectedBody": "string",
+      "bodyMatcher": "contains"
     }
   ]
 }

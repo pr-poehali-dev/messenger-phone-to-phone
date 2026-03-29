@@ -5,7 +5,7 @@ import { api } from "@/api";
 // ─── Types ───────────────────────────────────────────────────
 interface User { id: number; name: string; phone: string; username?: string; bio?: string; online?: boolean; }
 interface Chat { id: number; name: string; partner_id?: number; partner_online?: boolean; last_msg?: string; last_time?: string; unread: number; is_group: boolean; }
-interface Message { id: number; sender_id: number; sender_name: string; text: string; created_at: string; mine: boolean; }
+interface Message { id: number; sender_id: number; sender_name: string; text: string; created_at: string; mine: boolean; media_url?: string; media_type?: string; }
 
 // ─── Helpers ─────────────────────────────────────────────────
 function initials(name: string) {
@@ -157,12 +157,31 @@ function ChatsView({ onOpenChat }: { onOpenChat: (chat: Chat) => void }) {
   );
 }
 
+// ─── Emoji Picker ─────────────────────────────────────────────
+const EMOJIS = ["😀","😂","🥰","😍","🤩","😎","🥺","😭","😤","🤔","👍","👎","❤️","🔥","✨","🎉","🙏","💯","😅","🤣","😊","😇","🥳","😬","🤯","💀","👀","🫶","🤝","💪","🎯","🚀","💬","🌟","💥","🎁","🌈","🍕","☕","🐶"];
+function EmojiPicker({ onPick, onClose }: { onPick: (e: string) => void; onClose: () => void }) {
+  return (
+    <div className="absolute bottom-14 left-0 z-50 w-72 glass rounded-2xl p-3 shadow-2xl border border-white/10 animate-scale-in">
+      <div className="flex flex-wrap gap-1">
+        {EMOJIS.map(e => (
+          <button key={e} onClick={() => { onPick(e); onClose(); }}
+            className="w-9 h-9 flex items-center justify-center text-xl hover:bg-white/10 rounded-xl transition-colors">{e}</button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ─── Chat dialog ─────────────────────────────────────────────
 function ChatView({ chat, onBack, onVideoCall }: { chat: Chat; onBack: () => void; onVideoCall: () => void }) {
   const [msgs, setMsgs] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(true);
+  const [showEmoji, setShowEmoji] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [lightbox, setLightbox] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
   const load = useCallback(async () => { const res = await api.chatMessages(chat.id); if (res.messages) { setMsgs(res.messages); setLoading(false); } }, [chat.id]);
   useEffect(() => { load(); const t = setInterval(load, 3000); return () => clearInterval(t); }, [load]);
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [msgs.length]);
@@ -174,8 +193,32 @@ function ChatView({ chat, onBack, onVideoCall }: { chat: Chat; onBack: () => voi
     if (res.message) setMsgs(prev => [...prev, res.message]);
   };
 
+  const handleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]; if (!file) return;
+    e.target.value = "";
+    const maxMb = file.type.startsWith("video") ? 50 : 10;
+    if (file.size > maxMb * 1024 * 1024) { alert(`Файл слишком большой (макс ${maxMb} МБ)`); return; }
+    setUploading(true);
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const b64 = (reader.result as string).split(",")[1];
+      const up = await api.chatUpload(b64, file.name, file.type);
+      if (up.url) {
+        const res = await api.chatSendMedia(chat.id, "", up.url, up.media_type);
+        if (res.message) setMsgs(prev => [...prev, res.message]);
+      }
+      setUploading(false);
+    };
+    reader.readAsDataURL(file);
+  };
+
   return (
     <div className="flex flex-col h-full animate-scale-in">
+      {lightbox && (
+        <div className="fixed inset-0 z-50 bg-black/90 flex items-center justify-center" onClick={() => setLightbox(null)}>
+          <img src={lightbox} className="max-w-full max-h-full rounded-xl object-contain" />
+        </div>
+      )}
       <div className="flex items-center gap-3 px-4 py-3 border-b border-white/8 flex-shrink-0">
         <button onClick={onBack} className="text-white/50 hover:text-white transition-colors"><Icon name="ArrowLeft" size={20} /></button>
         <Avatar name={chat.name || "?"} id={chat.partner_id || chat.id} online={chat.partner_online} />
@@ -186,7 +229,7 @@ function ChatView({ chat, onBack, onVideoCall }: { chat: Chat; onBack: () => voi
         <button onClick={onVideoCall} className="w-9 h-9 rounded-full bg-white/8 hover:bg-violet-500/30 transition-colors flex items-center justify-center text-white/70 hover:text-violet-300"><Icon name="Video" size={17} /></button>
         <button className="w-9 h-9 rounded-full bg-white/8 hover:bg-white/15 transition-colors flex items-center justify-center text-white/70"><Icon name="Phone" size={17} /></button>
       </div>
-      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
+      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3" onClick={() => setShowEmoji(false)}>
         {loading && <div className="flex justify-center py-8"><div className="w-5 h-5 rounded-full border-2 border-violet-500 border-t-transparent animate-spin" /></div>}
         {!loading && msgs.length === 0 && <div className="text-center py-12 text-white/25 text-sm">Начните общение!</div>}
         {msgs.map(msg => (
@@ -194,17 +237,41 @@ function ChatView({ chat, onBack, onVideoCall }: { chat: Chat; onBack: () => voi
             <div className={`text-[11px] mb-1 px-1 font-medium ${msg.mine ? "text-violet-300/70" : "text-white/45"}`}>
               {msg.mine ? "Вы" : msg.sender_name}
             </div>
-            <div className={`max-w-[75%] px-4 py-2.5 rounded-2xl text-sm leading-relaxed ${msg.mine ? "btn-gradient rounded-br-sm" : "bg-white/8 rounded-bl-sm"}`}>
-              {msg.text}
-              <div className={`text-[10px] mt-1 ${msg.mine ? "text-white/60" : "text-white/35"} text-right`}>{formatTime(msg.created_at)}</div>
+            <div className={`max-w-[75%] rounded-2xl overflow-hidden ${msg.mine ? "rounded-br-sm" : "rounded-bl-sm"}`}>
+              {msg.media_type === "image" && msg.media_url && (
+                <img src={msg.media_url} onClick={() => setLightbox(msg.media_url!)}
+                  className="w-full max-w-[240px] rounded-2xl cursor-pointer hover:opacity-90 transition-opacity object-cover"
+                  style={{ maxHeight: 200 }} />
+              )}
+              {msg.media_type === "video" && msg.media_url && (
+                <video src={msg.media_url} controls
+                  className="w-full max-w-[240px] rounded-2xl"
+                  style={{ maxHeight: 200 }} />
+              )}
+              {(msg.text || !msg.media_url) && (
+                <div className={`px-4 py-2.5 text-sm leading-relaxed ${msg.mine ? "btn-gradient" : "bg-white/8"} ${msg.media_url ? "mt-1" : ""}`}>
+                  {msg.text}
+                  <div className={`text-[10px] mt-1 ${msg.mine ? "text-white/60" : "text-white/35"} text-right`}>{formatTime(msg.created_at)}</div>
+                </div>
+              )}
+              {msg.media_url && !msg.text && (
+                <div className={`px-3 py-1 text-[10px] ${msg.mine ? "text-white/60" : "text-white/35"} text-right`}>{formatTime(msg.created_at)}</div>
+              )}
             </div>
           </div>
         ))}
         <div ref={bottomRef} />
       </div>
-      <div className="px-4 py-3 border-t border-white/8 flex-shrink-0">
+      <div className="px-4 py-3 border-t border-white/8 flex-shrink-0 relative">
+        {showEmoji && <EmojiPicker onPick={e => setInput(p => p + e)} onClose={() => setShowEmoji(false)} />}
+        <input ref={fileRef} type="file" accept="image/*,video/*" className="hidden" onChange={handleFile} />
         <div className="flex items-center gap-2">
-          <button className="w-9 h-9 flex-shrink-0 rounded-xl bg-white/8 hover:bg-white/15 transition-colors flex items-center justify-center text-white/50"><Icon name="Paperclip" size={16} /></button>
+          <button onClick={() => setShowEmoji(v => !v)}
+            className={`w-9 h-9 flex-shrink-0 rounded-xl transition-colors flex items-center justify-center text-lg ${showEmoji ? "bg-violet-500/30 text-violet-300" : "bg-white/8 hover:bg-white/15 text-white/50"}`}>😊</button>
+          <button onClick={() => fileRef.current?.click()} disabled={uploading}
+            className="w-9 h-9 flex-shrink-0 rounded-xl bg-white/8 hover:bg-white/15 transition-colors flex items-center justify-center text-white/50 disabled:opacity-40">
+            {uploading ? <div className="w-4 h-4 border-2 border-violet-400 border-t-transparent rounded-full animate-spin" /> : <Icon name="Paperclip" size={16} />}
+          </button>
           <input value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === "Enter" && send()}
             placeholder="Сообщение..." className="flex-1 bg-white/5 border border-white/10 rounded-xl px-4 py-2.5 text-sm text-white placeholder-white/30 outline-none focus:border-violet-500/50 transition-colors" />
           <button onClick={send} className="w-9 h-9 flex-shrink-0 btn-gradient rounded-xl flex items-center justify-center"><Icon name="Send" size={15} /></button>
