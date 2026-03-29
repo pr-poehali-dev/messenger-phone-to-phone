@@ -2,6 +2,7 @@ const URLS = {
   auth: "https://functions.poehali.dev/3aa2dc4e-19e5-4093-a361-b95d3a524e1c",
   chats: "https://functions.poehali.dev/93a30372-2e66-4c68-9e8f-e5e9b226aa20",
   contacts: "https://functions.poehali.dev/5942a00c-70bf-40fb-abef-8effa45ac51a",
+  calls: "https://functions.poehali.dev/e2361b36-7016-44ba-80d5-b79e4aaba674",
 };
 
 function getToken() {
@@ -55,4 +56,25 @@ export const api = {
 
   chatSendMedia: (chat_id: number, text: string, media_url: string, media_type: string) =>
     call(URLS.chats, { action: "send", chat_id, text, media_url, media_type }),
+
+  callStart: (chat_id: number, callee_id: number, call_type: "audio" | "video") =>
+    call(URLS.calls, { action: "start", chat_id, callee_id, call_type }),
+
+  callAnswer: (call_id: number) =>
+    call(URLS.calls, { action: "answer", call_id }),
+
+  callReject: (call_id: number) =>
+    call(URLS.calls, { action: "reject", call_id }),
+
+  callEnd: (call_id: number) =>
+    call(URLS.calls, { action: "end", call_id }),
+
+  callSignal: (call_id: number, to_user_id: number, signal_type: string, payload: unknown) =>
+    call(URLS.calls, { action: "signal", call_id, to_user_id, signal_type, payload }),
+
+  callPoll: (call_id: number, since_id: number) =>
+    call(URLS.calls, { action: "poll", call_id, since_id }),
+
+  callIncoming: () =>
+    call(URLS.calls, { action: "incoming" }),
 };

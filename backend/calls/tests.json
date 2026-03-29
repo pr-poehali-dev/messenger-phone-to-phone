@@ -1,0 +1,1 @@
+{"tests": [{"name": "Without auth returns 401", "method": "POST", "path": "/", "body": {"action": "incoming"}, "expectedStatus": 401}]}

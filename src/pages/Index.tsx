@@ -173,7 +173,7 @@ function EmojiPicker({ onPick, onClose }: { onPick: (e: string) => void; onClose
 }
 
 // ─── Chat dialog ─────────────────────────────────────────────
-function ChatView({ chat, onBack, onVideoCall }: { chat: Chat; onBack: () => void; onVideoCall: () => void }) {
+function ChatView({ chat, onBack, onVideoCall, onAudioCall }: { chat: Chat; onBack: () => void; onVideoCall: () => void; onAudioCall: () => void }) {
   const [msgs, setMsgs] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(true);
@@ -227,7 +227,7 @@ function ChatView({ chat, onBack, onVideoCall }: { chat: Chat; onBack: () => voi
           <div className={`text-xs ${chat.partner_online ? "text-emerald-400" : "text-white/35"}`}>{chat.partner_online ? "в сети" : "не в сети"}</div>
         </div>
         <button onClick={onVideoCall} className="w-9 h-9 rounded-full bg-white/8 hover:bg-violet-500/30 transition-colors flex items-center justify-center text-white/70 hover:text-violet-300"><Icon name="Video" size={17} /></button>
-        <button className="w-9 h-9 rounded-full bg-white/8 hover:bg-white/15 transition-colors flex items-center justify-center text-white/70"><Icon name="Phone" size={17} /></button>
+        <button onClick={onAudioCall} className="w-9 h-9 rounded-full bg-white/8 hover:bg-emerald-500/30 transition-colors flex items-center justify-center text-white/70 hover:text-emerald-300"><Icon name="Phone" size={17} /></button>
       </div>
       <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3" onClick={() => setShowEmoji(false)}>
         {loading && <div className="flex justify-center py-8"><div className="w-5 h-5 rounded-full border-2 border-violet-500 border-t-transparent animate-spin" /></div>}
@@ -449,31 +449,230 @@ function SettingsView() {
   );
 }
 
-// ─── Video Call ───────────────────────────────────────────────
-function VideoCallView({ name, id, onClose }: { name: string; id: number; onClose: () => void }) {
+// ─── Incoming Call Banner ─────────────────────────────────────
+function IncomingCallBanner({ call, onAnswer, onReject }: {
+  call: { id: number; caller_name: string; caller_id: number; call_type: string };
+  onAnswer: () => void;
+  onReject: () => void;
+}) {
+  return (
+    <div className="fixed inset-x-0 top-0 z-[60] px-4 pt-4 animate-slide-in">
+      <div className="glass rounded-2xl p-4 border border-white/15 shadow-2xl flex items-center gap-3">
+        <div className="relative flex-shrink-0">
+          <div className={`w-12 h-12 rounded-full bg-gradient-to-br ${colorFor(call.caller_id)} flex items-center justify-center font-bold text-white`}>
+            {initials(call.caller_name)}
+          </div>
+          <span className="absolute inset-0 rounded-full border-2 border-violet-400/50 animate-ping" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-white font-semibold text-sm truncate">{call.caller_name}</p>
+          <p className="text-white/50 text-xs flex items-center gap-1">
+            <Icon name={call.call_type === "video" ? "Video" : "Phone"} size={10} />
+            Входящий {call.call_type === "video" ? "видеозвонок" : "звонок"}
+          </p>
+        </div>
+        <button onClick={onReject} className="w-11 h-11 rounded-full bg-red-500/80 hover:bg-red-600 flex items-center justify-center transition-all">
+          <Icon name="PhoneOff" size={18} className="text-white" />
+        </button>
+        <button onClick={onAnswer} className="w-11 h-11 rounded-full bg-emerald-500/80 hover:bg-emerald-600 flex items-center justify-center transition-all">
+          <Icon name={call.call_type === "video" ? "Video" : "Phone"} size={18} className="text-white" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Call View (WebRTC) ───────────────────────────────────────
+function CallView({
+  callId, callType, partnerName, partnerId, partnerUserId, isOutgoing, onClose
+}: {
+  callId: number; callType: "audio" | "video"; partnerName: string; partnerId: number;
+  partnerUserId: number; isOutgoing: boolean; onClose: () => void;
+}) {
+  const [status, setStatus] = useState<"ringing" | "active" | "ended">(isOutgoing ? "ringing" : "active");
   const [muted, setMuted] = useState(false);
   const [videoOff, setVideoOff] = useState(false);
+  const [duration, setDuration] = useState(0);
+
+  const localVideoRef = useRef<HTMLVideoElement>(null);
+  const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const pcRef = useRef<RTCPeerConnection | null>(null);
+  const localStreamRef = useRef<MediaStream | null>(null);
+  const lastSignalIdRef = useRef(0);
+  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const durationTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const ICE_SERVERS = [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+  ];
+
+  const stopAll = useCallback(() => {
+    if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+    if (durationTimerRef.current) clearInterval(durationTimerRef.current);
+    if (pcRef.current) { pcRef.current.close(); pcRef.current = null; }
+    if (localStreamRef.current) { localStreamRef.current.getTracks().forEach(t => t.stop()); }
+  }, []);
+
+  const endCall = useCallback(async () => {
+    await api.callEnd(callId);
+    stopAll();
+    onClose();
+  }, [callId, stopAll, onClose]);
+
+  const startPoll = useCallback(() => {
+    pollTimerRef.current = setInterval(async () => {
+      const res = await api.callPoll(callId, lastSignalIdRef.current);
+      if (!res.signals) return;
+      if (res.call_status === "rejected" || res.call_status === "ended") {
+        stopAll(); onClose(); return;
+      }
+      if (res.call_status === "active" && status !== "active") setStatus("active");
+      for (const sig of res.signals) {
+        lastSignalIdRef.current = Math.max(lastSignalIdRef.current, sig.id);
+        const pc = pcRef.current;
+        if (!pc) return;
+        if (sig.signal_type === "offer") {
+          await pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(sig.payload)));
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          await api.callSignal(callId, partnerUserId, "answer", answer);
+        } else if (sig.signal_type === "answer") {
+          await pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(sig.payload)));
+        } else if (sig.signal_type === "ice-candidate") {
+          try { await pc.addIceCandidate(new RTCIceCandidate(JSON.parse(sig.payload))); } catch (_e) { /* ignore */ }
+        }
+      }
+    }, 1000);
+  }, [callId, partnerUserId, status, stopAll, onClose]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: callType === "video",
+      }).catch(() => null);
+      if (cancelled || !stream) return;
+      localStreamRef.current = stream;
+      if (localVideoRef.current) { localVideoRef.current.srcObject = stream; }
+
+      const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+      pcRef.current = pc;
+      stream.getTracks().forEach(t => pc.addTrack(t, stream));
+
+      pc.ontrack = (e) => {
+        if (remoteVideoRef.current && e.streams[0]) remoteVideoRef.current.srcObject = e.streams[0];
+      };
+
+      pc.onicecandidate = async (e) => {
+        if (e.candidate) await api.callSignal(callId, partnerUserId, "ice-candidate", e.candidate);
+      };
+
+      pc.onconnectionstatechange = () => {
+        if (pc.connectionState === "connected") {
+          setStatus("active");
+          durationTimerRef.current = setInterval(() => setDuration(d => d + 1), 1000);
+        }
+        if (pc.connectionState === "disconnected" || pc.connectionState === "failed") endCall();
+      };
+
+      if (isOutgoing) {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        await api.callSignal(callId, partnerUserId, "offer", offer);
+      }
+
+      startPoll();
+    })();
+    return () => { cancelled = true; stopAll(); };
+  }, []);
+
+  useEffect(() => {
+    if (localStreamRef.current) {
+      localStreamRef.current.getAudioTracks().forEach(t => { t.enabled = !muted; });
+    }
+  }, [muted]);
+
+  useEffect(() => {
+    if (localStreamRef.current) {
+      localStreamRef.current.getVideoTracks().forEach(t => { t.enabled = !videoOff; });
+    }
+  }, [videoOff]);
+
+  const formatDur = (s: number) => `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+
   return (
     <div className="fixed inset-0 z-50 flex flex-col animate-scale-in" style={{ background: "linear-gradient(160deg,#1a0533 0%,#0d1a2e 50%,#031a0e 100%)" }}>
-      <div className="absolute inset-0">
+      <div className="absolute inset-0 pointer-events-none">
         <div className="orb w-80 h-80 opacity-25 top-[-60px] left-[-60px]" style={{ background: "var(--grad-1)" }} />
         <div className="orb w-64 h-64 opacity-20 bottom-[-40px] right-[-40px]" style={{ background: "var(--grad-2)" }} />
       </div>
+
+      {callType === "video" && (
+        <>
+          <video ref={remoteVideoRef} autoPlay playsInline className="absolute inset-0 w-full h-full object-cover opacity-80" />
+          <video ref={localVideoRef} autoPlay playsInline muted className="absolute bottom-28 right-4 w-28 h-36 rounded-xl object-cover border border-white/20 shadow-xl z-10" />
+        </>
+      )}
+
       <div className="relative flex-1 flex flex-col items-center justify-center">
-        <div className="relative mb-6">
-          <div className={`w-28 h-28 rounded-full bg-gradient-to-br ${colorFor(id)} flex items-center justify-center text-3xl font-black text-white shadow-2xl`}>{initials(name)}</div>
-          <span className="absolute inset-0 rounded-full border-2 border-violet-400/50" style={{ animation: "pulse-ring 1.5s ease-out infinite" }} />
-          <span className="absolute inset-0 rounded-full border-2 border-violet-400/30" style={{ animation: "pulse-ring 1.5s ease-out 0.5s infinite" }} />
-        </div>
-        <h2 className="text-2xl font-bold text-white">{name}</h2>
-        <p className="text-white/50 mt-1 text-sm">Вызов...</p>
+        {callType === "audio" && (
+          <div className="relative mb-6">
+            <div className={`w-28 h-28 rounded-full bg-gradient-to-br ${colorFor(partnerId)} flex items-center justify-center text-3xl font-black text-white shadow-2xl`}>
+              {initials(partnerName)}
+            </div>
+            {status === "ringing" && (
+              <>
+                <span className="absolute inset-0 rounded-full border-2 border-violet-400/50" style={{ animation: "pulse-ring 1.5s ease-out infinite" }} />
+                <span className="absolute inset-0 rounded-full border-2 border-violet-400/30" style={{ animation: "pulse-ring 1.5s ease-out 0.5s infinite" }} />
+              </>
+            )}
+          </div>
+        )}
+        {callType === "audio" && (
+          <>
+            <h2 className="text-2xl font-bold text-white">{partnerName}</h2>
+            <p className="text-white/50 mt-1 text-sm">
+              {status === "ringing" ? "Вызов..." : status === "active" ? formatDur(duration) : "Завершён"}
+            </p>
+          </>
+        )}
+        {callType === "video" && status === "active" && (
+          <div className="absolute top-4 left-0 right-0 flex justify-center">
+            <span className="glass px-3 py-1 rounded-full text-xs text-white/70">{formatDur(duration)}</span>
+          </div>
+        )}
+        {callType === "video" && status === "ringing" && (
+          <div className="flex flex-col items-center">
+            <div className={`w-24 h-24 rounded-full bg-gradient-to-br ${colorFor(partnerId)} flex items-center justify-center text-2xl font-black text-white shadow-2xl mb-4`}>
+              {initials(partnerName)}
+            </div>
+            <h2 className="text-xl font-bold text-white">{partnerName}</h2>
+            <p className="text-white/50 mt-1 text-sm">Видеозвонок...</p>
+          </div>
+        )}
       </div>
+
       <div className="relative pb-10 px-8 flex items-center justify-center gap-5">
-        <button onClick={() => setMuted(m => !m)} className={`w-14 h-14 rounded-full flex items-center justify-center transition-all ${muted ? "bg-red-500/80" : "bg-white/12 hover:bg-white/20"}`}><Icon name={muted ? "MicOff" : "Mic"} size={22} className="text-white" /></button>
-        <button onClick={() => setVideoOff(v => !v)} className={`w-14 h-14 rounded-full flex items-center justify-center transition-all ${videoOff ? "bg-red-500/80" : "bg-white/12 hover:bg-white/20"}`}><Icon name={videoOff ? "VideoOff" : "Video"} size={22} className="text-white" /></button>
-        <button onClick={onClose} className="w-16 h-16 rounded-full bg-red-500 hover:bg-red-600 flex items-center justify-center shadow-lg transition-all hover:scale-105"><Icon name="PhoneOff" size={26} className="text-white" /></button>
-        <button className="w-14 h-14 rounded-full bg-white/12 hover:bg-white/20 flex items-center justify-center transition-all"><Icon name="ScreenShare" size={22} className="text-white" /></button>
-        <button className="w-14 h-14 rounded-full bg-white/12 hover:bg-white/20 flex items-center justify-center transition-all"><Icon name="Users" size={22} className="text-white" /></button>
+        <button onClick={() => setMuted(m => !m)}
+          className={`w-14 h-14 rounded-full flex items-center justify-center transition-all ${muted ? "bg-red-500/80" : "bg-white/12 hover:bg-white/20"}`}>
+          <Icon name={muted ? "MicOff" : "Mic"} size={22} className="text-white" />
+        </button>
+        {callType === "video" && (
+          <button onClick={() => setVideoOff(v => !v)}
+            className={`w-14 h-14 rounded-full flex items-center justify-center transition-all ${videoOff ? "bg-red-500/80" : "bg-white/12 hover:bg-white/20"}`}>
+            <Icon name={videoOff ? "VideoOff" : "Video"} size={22} className="text-white" />
+          </button>
+        )}
+        <button onClick={endCall} className="w-16 h-16 rounded-full bg-red-500 hover:bg-red-600 flex items-center justify-center shadow-lg transition-all hover:scale-105">
+          <Icon name="PhoneOff" size={26} className="text-white" />
+        </button>
+        {callType === "audio" && (
+          <button className="w-14 h-14 rounded-full bg-white/12 hover:bg-white/20 flex items-center justify-center transition-all">
+            <Icon name="Volume2" size={22} className="text-white" />
+          </button>
+        )}
       </div>
     </div>
   );
@@ -489,13 +688,31 @@ const TABS = [
 ];
 const TITLES: Record<string, string> = { chats: "Чаты", contacts: "Контакты", notifications: "Уведомления", profile: "Профиль", settings: "Настройки" };
 
+// ─── Types for calls ─────────────────────────────────────────
+interface ActiveCall {
+  callId: number;
+  callType: "audio" | "video";
+  partnerName: string;
+  partnerId: number;
+  partnerUserId: number;
+  isOutgoing: boolean;
+}
+interface IncomingCall {
+  id: number;
+  caller_name: string;
+  caller_id: number;
+  call_type: string;
+  chat_id: number;
+}
+
 // ─── App ──────────────────────────────────────────────────────
 export default function Index() {
   const [user, setUser] = useState<User | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
   const [tab, setTab] = useState("chats");
   const [openChat, setOpenChat] = useState<Chat | null>(null);
-  const [videoCall, setVideoCall] = useState<{ name: string; id: number } | null>(null);
+  const [activeCall, setActiveCall] = useState<ActiveCall | null>(null);
+  const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null);
 
   useEffect(() => {
     const token = localStorage.getItem("pulse_token");
@@ -503,9 +720,55 @@ export default function Index() {
     else setAuthChecked(true);
   }, []);
 
-  const handleLogout = async () => { await api.logout(); localStorage.removeItem("pulse_token"); setUser(null); };
+  // Polling incoming calls when logged in
+  useEffect(() => {
+    if (!user) return;
+    const check = async () => {
+      const res = await api.callIncoming();
+      if (res.call && !activeCall) setIncomingCall(res.call);
+      else if (!res.call) setIncomingCall(null);
+    };
+    const t = setInterval(check, 2000);
+    return () => clearInterval(t);
+  }, [user, activeCall]);
 
+  const handleLogout = async () => { await api.logout(); localStorage.removeItem("pulse_token"); setUser(null); };
   const openChatView = (chat: Chat) => { setOpenChat(chat); setTab("chats"); };
+
+  const startCall = async (chat: Chat, type: "audio" | "video") => {
+    if (!chat.partner_id) return;
+    const res = await api.callStart(chat.id, chat.partner_id, type);
+    if (res.call_id) {
+      setActiveCall({
+        callId: res.call_id,
+        callType: type,
+        partnerName: chat.name,
+        partnerId: chat.partner_id,
+        partnerUserId: chat.partner_id,
+        isOutgoing: true,
+      });
+    }
+  };
+
+  const answerCall = async () => {
+    if (!incomingCall) return;
+    await api.callAnswer(incomingCall.id);
+    setActiveCall({
+      callId: incomingCall.id,
+      callType: incomingCall.call_type as "audio" | "video",
+      partnerName: incomingCall.caller_name,
+      partnerId: incomingCall.caller_id,
+      partnerUserId: incomingCall.caller_id,
+      isOutgoing: false,
+    });
+    setIncomingCall(null);
+  };
+
+  const rejectCall = async () => {
+    if (!incomingCall) return;
+    await api.callReject(incomingCall.id);
+    setIncomingCall(null);
+  };
 
   if (!authChecked) return (
     <div className="h-screen flex items-center justify-center" style={{ background: "#0e0e1a" }}>
@@ -537,7 +800,8 @@ export default function Index() {
           <div className="relative flex-1 overflow-hidden">
             {openChat ? (
               <ChatView chat={openChat} onBack={() => setOpenChat(null)}
-                onVideoCall={() => setVideoCall({ name: openChat.name || "?", id: openChat.partner_id || 0 })} />
+                onVideoCall={() => startCall(openChat, "video")}
+                onAudioCall={() => startCall(openChat, "audio")} />
             ) : (
               <div className="h-full">
                 {tab === "chats" && <ChatsView onOpenChat={openChatView} />}
@@ -570,7 +834,21 @@ export default function Index() {
         </>
       )}
 
-      {videoCall && <VideoCallView name={videoCall.name} id={videoCall.id} onClose={() => setVideoCall(null)} />}
+      {incomingCall && !activeCall && (
+        <IncomingCallBanner call={incomingCall} onAnswer={answerCall} onReject={rejectCall} />
+      )}
+
+      {activeCall && (
+        <CallView
+          callId={activeCall.callId}
+          callType={activeCall.callType}
+          partnerName={activeCall.partnerName}
+          partnerId={activeCall.partnerId}
+          partnerUserId={activeCall.partnerUserId}
+          isOutgoing={activeCall.isOutgoing}
+          onClose={() => setActiveCall(null)}
+        />
+      )}
     </div>
   );
 }
